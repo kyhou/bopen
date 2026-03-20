@@ -15,24 +15,141 @@ pub fn launch(
     // Clean the exec path (remove placeholders like %u)
     let clean_exec = clean_exec(&browser.exec);
 
-    // Check if the browser binary exists
-    if !is_binary_available(&clean_exec) {
-        return Err(format!("Browser binary not found: {}", clean_exec).into());
-    }
+    // Resolve the full path to the binary
+    let binary_path = resolve_binary_path(&clean_exec)
+        .ok_or_else(|| format!("Browser binary not found: {}", clean_exec))?;
 
-    // Build the command based on browser type
-    let mut command = if super::profile::is_firefox_based(&clean_exec) {
-        build_firefox_command(&clean_exec, profile, container, url, incognito, new_window)?
+    // Build command arguments based on browser type
+    let args = if super::profile::is_firefox_based(&clean_exec) {
+        build_firefox_args(&binary_path, profile, container, url, incognito, new_window)
     } else if super::profile::is_chromium_based(&clean_exec) {
-        build_chromium_command(&clean_exec, profile, url, incognito, new_window)
+        build_chromium_args(&binary_path, profile, url, incognito, new_window)
     } else {
-        build_unknown_command(&clean_exec, url)
+        vec![binary_path.clone(), url.to_string()]
     };
 
-    // Spawn the process detached from the terminal
-    command.spawn()?;
+    // Build the full command string with proper quoting
+    let cmd_str = args
+        .iter()
+        .map(|s| shell_quote(s))
+        .collect::<Vec<_>>()
+        .join(" ");
 
+    // Use setsid to properly detach the process and inherit the full environment
+    // This is necessary when launching from desktop environments (e.g., Telegram links)
+    let mut command = Command::new("setsid");
+    command.arg("-f"); // Fork and run in background
+    command.arg("sh");
+    command.arg("-c");
+    command.arg(&cmd_str);
+
+    // Explicitly inherit all environment variables (DISPLAY, XAUTHORITY, DBUS, etc.)
+    command.envs(std::env::vars());
+
+    command.spawn()?;
     Ok(())
+}
+
+/// Builds Firefox arguments as a vector
+fn build_firefox_args(
+    exec: &str,
+    profile: &Profile,
+    container: Option<&Container>,
+    url: &str,
+    incognito: bool,
+    new_window: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        exec.to_string(),
+        "--no-remote".to_string(),
+        "-P".to_string(),
+        profile.name.clone(),
+    ];
+
+    if let Some(container) = container {
+        let uri = format!("ext+container:name={}&url={}", container.name, url);
+        args.push(uri);
+    } else {
+        if incognito {
+            args.push("--private-window".to_string());
+        } else if new_window {
+            args.push("--new-window".to_string());
+        }
+        args.push(url.to_string());
+    }
+
+    args
+}
+
+/// Builds Chromium arguments as a vector
+fn build_chromium_args(
+    exec: &str,
+    profile: &Profile,
+    url: &str,
+    incognito: bool,
+    new_window: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        exec.to_string(),
+        format!("--profile-directory={}", profile.name),
+    ];
+
+    if incognito {
+        args.push("--incognito".to_string());
+    }
+    if new_window {
+        args.push("--new-window".to_string());
+    }
+    args.push(url.to_string());
+
+    args
+}
+
+/// Properly quote a string for shell execution
+fn shell_quote(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace("'", "'\\''"))
+    }
+}
+
+/// Resolves a binary name to its full path
+fn resolve_binary_path(binary: &str) -> Option<String> {
+    let binary_name = binary.split_whitespace().next().unwrap_or(binary);
+
+    // If it's an absolute path and exists, return it
+    if std::path::Path::new(binary_name).is_absolute() {
+        if std::path::Path::new(binary_name).exists() {
+            return Some(binary_name.to_string());
+        }
+    }
+
+    // Common system directories to check (for desktop environment launches)
+    let system_dirs = ["/usr/bin", "/usr/local/bin", "/snap/bin", "/opt/bin"];
+
+    // Check in PATH first
+    if let Ok(paths) = std::env::var("PATH") {
+        for path in paths.split(':') {
+            let full_path = std::path::Path::new(path).join(binary_name);
+            if full_path.exists() {
+                return full_path.to_str().map(String::from);
+            }
+        }
+    }
+
+    // Check common system directories
+    for dir in system_dirs {
+        let full_path = std::path::Path::new(dir).join(binary_name);
+        if full_path.exists() {
+            return full_path.to_str().map(String::from);
+        }
+    }
+
+    // Last resort: return the binary name and let the system try
+    Some(binary_name.to_string())
 }
 
 /// Cleans the Exec field by removing URL placeholders
@@ -46,97 +163,4 @@ fn clean_exec(exec: &str) -> String {
         .replace("%k", "")
         .trim()
         .to_string()
-}
-
-/// Checks if a binary is available in PATH
-fn is_binary_available(binary: &str) -> bool {
-    // Extract just the binary name (first token)
-    let binary_name = binary.split_whitespace().next().unwrap_or(binary);
-
-    // Check if it's an absolute path
-    if std::path::Path::new(binary_name).is_absolute() {
-        return std::path::Path::new(binary_name).exists();
-    }
-
-    // Check in PATH
-    if let Ok(paths) = std::env::var("PATH") {
-        for path in paths.split(':') {
-            let full_path = std::path::Path::new(path).join(binary_name);
-            if full_path.exists() {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Builds the command for Firefox-based browsers
-fn build_firefox_command(
-    exec: &str,
-    profile: &Profile,
-    container: Option<&Container>,
-    url: &str,
-    incognito: bool,
-    new_window: bool,
-) -> Result<Command, Box<dyn std::error::Error>> {
-    let mut command = Command::new(exec);
-
-    // Base Firefox arguments - use --no-remote to prevent reusing existing windows
-    command.arg("--no-remote");
-    command.arg("-P");
-    command.arg(&profile.name);
-
-    // Handle container vs regular profile
-    if let Some(container) = container {
-        // Container mode requires the Open URL in Container extension
-        // Build the ext+container: URI
-        let uri = format!("ext+container:name={}&url={}", container.name, url);
-        command.arg(uri);
-    } else {
-        // Regular profile mode - flags must come BEFORE the URL
-        if incognito {
-            command.arg("--private-window");
-        } else if new_window {
-            command.arg("--new-window");
-        }
-        // URL comes last
-        command.arg(url);
-    }
-
-    Ok(command)
-}
-
-/// Builds the command for Chromium-based browsers
-fn build_chromium_command(
-    exec: &str,
-    profile: &Profile,
-    url: &str,
-    incognito: bool,
-    new_window: bool,
-) -> Command {
-    let mut command = Command::new(exec);
-
-    // Base Chromium arguments
-    command.arg(format!("--profile-directory={}", profile.name));
-    command.arg(url);
-
-    // Add incognito flag if requested
-    if incognito {
-        command.arg("--incognito");
-    }
-
-    // Add new window flag if requested
-    if new_window {
-        command.arg("--new-window");
-    }
-
-    command
-}
-
-/// Builds the command for unknown browsers
-fn build_unknown_command(exec: &str, url: &str) -> Command {
-    let mut command = Command::new(exec);
-    command.arg(url);
-    command
 }

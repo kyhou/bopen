@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=bopen
+GenericName=Browser Launcher
+Comment=Terminal-based browser launcher with profile management
+Exec=/usr/local/bin/bopen %u
+Icon=browser
+Terminal=true
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;text/html;
+StartupNotify=true
+Keywords=browser;launcher;profile;incognito;

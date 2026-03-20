@@ -17,13 +17,75 @@ A fast, terminal-based browser launcher for Linux that makes opening URLs with t
 
 ## Installation
 
-### From Source
+### Prerequisites
+
+Install Rust and Cargo (if not already installed):
 
 ```bash
-git clone https://github.com/yourusername/bopen.git
+# On Debian/Ubuntu
+sudo apt install rustc cargo
+
+# On Fedora
+sudo dnf install rust cargo
+
+# On Arch Linux
+sudo pacman -S rust cargo
+
+# Or use rustup for the latest version
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+### Compile and Install
+
+```bash
+# Clone the repository
+git clone https://github.com/kyhou/bopen.git
 cd bopen
+
+# Build the release version
 cargo build --release
+
+# Install the binary
 sudo cp target/release/bopen /usr/local/bin/
+
+# Verify installation
+bopen --version
+```
+
+### Uninstall
+
+```bash
+sudo rm /usr/local/bin/bopen
+rm -rf ~/.config/bopen
+rm ~/.local/share/applications/bopen.desktop
+```
+
+### Set as Default Browser
+
+To use bopen as your default browser, install the `.desktop` file and register the MIME types:
+
+```bash
+# Install the desktop file
+cp data/bopen.desktop ~/.local/share/applications/
+
+# Register as default browser for HTTP/HTTPS
+xdg-mime default bopen.desktop x-scheme-handler/http
+xdg-mime default bopen.desktop x-scheme-handler/https
+
+# Optional: Also handle HTML files
+xdg-mime default bopen.desktop text/html
+```
+
+To verify the registration:
+```bash
+xdg-mime query default x-scheme-handler/http
+xdg-mime query default x-scheme-handler/https
+```
+
+To revert to another browser:
+```bash
+xdg-mime default firefox.desktop x-scheme-handler/http
+xdg-mime default firefox.desktop x-scheme-handler/https
 ```
 
 ### Dependencies
