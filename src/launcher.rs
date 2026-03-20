@@ -35,18 +35,21 @@ pub fn launch(
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Use setsid to properly detach the process and inherit the full environment
-    // This is necessary when launching from desktop environments (e.g., Telegram links)
+    // Use setsid to create a new session for the browser
+    // This detaches it from the terminal so it survives when terminal closes
     let mut command = Command::new("setsid");
-    command.arg("-f"); // Fork and run in background
     command.arg("sh");
     command.arg("-c");
     command.arg(&cmd_str);
 
-    // Explicitly inherit all environment variables (DISPLAY, XAUTHORITY, DBUS, etc.)
+    // Explicitly inherit all environment variables
     command.envs(std::env::vars());
 
     command.spawn()?;
+
+    // Small delay to allow the browser to start before we exit
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
     Ok(())
 }
 
