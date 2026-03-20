@@ -2,7 +2,7 @@
 
 A fast, terminal-based browser launcher for Linux that makes opening URLs with the right browser, profile, and container effortless.
 
-![bopen demo](https://i.imgur.com/example.gif)
+![bopen screenshot](https://github.com/user-attachments/assets/35cc67fc-a215-48b1-a255-9dcca1ddd7c3)
 
 ## Features
 
