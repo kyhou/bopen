@@ -1,4 +1,6 @@
-use std::process::Command;
+use std::ffi::CString;
+
+use fork::{fork, Fork};
 
 use crate::browser::Browser;
 use crate::profile::{Container, Profile};
@@ -20,40 +22,44 @@ pub fn launch(
         .ok_or_else(|| format!("Browser binary not found: {}", clean_exec))?;
 
     // Build command arguments based on browser type
-    let args = if super::profile::is_firefox_based(&clean_exec) {
+    let args: Vec<CString> = if super::profile::is_firefox_based(&clean_exec) {
         build_firefox_args(&binary_path, profile, container, url, incognito, new_window)
     } else if super::profile::is_chromium_based(&clean_exec) {
         build_chromium_args(&binary_path, profile, url, incognito, new_window)
     } else {
-        vec![binary_path.clone(), url.to_string()]
+        vec![CString::new(binary_path.as_str())?, CString::new(url)?]
     };
 
-    // Build the full command string with proper quoting
-    let cmd_str = args
-        .iter()
-        .map(|s| shell_quote(s))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Fork and exec - this is the approach used by similar projects like brofile
+    // fork() creates a child process, exec() replaces it with the browser
+    unsafe {
+        match fork() {
+            Ok(Fork::Child) => {
+                // Child process - exec the browser
+                let exec_path = CString::new(binary_path.as_str())?;
+                let mut argv: Vec<*const i8> = args.iter().map(|s| s.as_ptr()).collect();
+                argv.push(std::ptr::null());
 
-    // Use setsid to create a new session for the browser
-    // This detaches it from the terminal so it survives when terminal closes
-    let mut command = Command::new("setsid");
-    command.arg("sh");
-    command.arg("-c");
-    command.arg(&cmd_str);
+                // Use setsid to create new session before exec
+                libc::setsid();
 
-    // Explicitly inherit all environment variables
-    command.envs(std::env::vars());
-
-    command.spawn()?;
-
-    // Small delay to allow the browser to start before we exit
-    std::thread::sleep(std::time::Duration::from_millis(100));
+                libc::execvp(exec_path.as_ptr(), argv.as_ptr());
+                // If execvp returns, it failed
+                std::process::exit(1);
+            }
+            Ok(Fork::Parent(_)) => {
+                // Parent process - success, parent will exit shortly
+            }
+            Err(e) => {
+                return Err(format!("fork failed: {}", e).into());
+            }
+        }
+    }
 
     Ok(())
 }
 
-/// Builds Firefox arguments as a vector
+/// Builds Firefox arguments as a CString vector for execvp
 fn build_firefox_args(
     exec: &str,
     profile: &Profile,
@@ -61,62 +67,51 @@ fn build_firefox_args(
     url: &str,
     incognito: bool,
     new_window: bool,
-) -> Vec<String> {
+) -> Vec<CString> {
     let mut args = vec![
-        exec.to_string(),
-        "--no-remote".to_string(),
-        "-P".to_string(),
-        profile.name.clone(),
+        CString::new(exec).unwrap(),
+        CString::new("--no-remote").unwrap(),
+        CString::new("-P").unwrap(),
+        CString::new(profile.name.as_str()).unwrap(),
     ];
 
     if let Some(container) = container {
         let uri = format!("ext+container:name={}&url={}", container.name, url);
-        args.push(uri);
+        args.push(CString::new(uri).unwrap());
     } else {
         if incognito {
-            args.push("--private-window".to_string());
+            args.push(CString::new("--private-window").unwrap());
         } else if new_window {
-            args.push("--new-window".to_string());
+            args.push(CString::new("--new-window").unwrap());
         }
-        args.push(url.to_string());
+        args.push(CString::new(url).unwrap());
     }
 
     args
 }
 
-/// Builds Chromium arguments as a vector
+/// Builds Chromium arguments as a CString vector for execvp
 fn build_chromium_args(
     exec: &str,
     profile: &Profile,
     url: &str,
     incognito: bool,
     new_window: bool,
-) -> Vec<String> {
+) -> Vec<CString> {
     let mut args = vec![
-        exec.to_string(),
-        format!("--profile-directory={}", profile.name),
+        CString::new(exec).unwrap(),
+        CString::new(format!("--profile-directory={}", profile.name)).unwrap(),
     ];
 
     if incognito {
-        args.push("--incognito".to_string());
+        args.push(CString::new("--incognito").unwrap());
     }
     if new_window {
-        args.push("--new-window".to_string());
+        args.push(CString::new("--new-window").unwrap());
     }
-    args.push(url.to_string());
+    args.push(CString::new(url).unwrap());
 
     args
-}
-
-/// Properly quote a string for shell execution
-fn shell_quote(s: &str) -> String {
-    if s.chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
-    {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace("'", "'\\''"))
-    }
 }
 
 /// Resolves a binary name to its full path
