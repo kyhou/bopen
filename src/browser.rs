@@ -45,7 +45,11 @@ pub fn discover_browsers() -> Vec<Browser> {
                 if let Some(browser) = parse_desktop_file(&file_path) {
                     // Resolve the binary path from the Exec field to check for duplicates
                     let resolved_exec = resolve_exec(&browser.exec);
-                    if seen_execs.insert(resolved_exec) {
+                    if seen_execs.insert(resolved_exec.clone()) {
+                        // Skip bopen itself to avoid infinite recursion
+                        if resolved_exec.ends_with("bopen") {
+                            continue;
+                        }
                         browsers.push(browser);
                     }
                 }
