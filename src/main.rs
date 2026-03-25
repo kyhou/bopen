@@ -20,9 +20,13 @@ mod browser;
 mod clipboard;
 mod config;
 mod launcher;
+mod pattern_manager;
 mod profile;
+mod url_pattern;
 
 use crate::app::{App, Focus};
+use crate::pattern_manager::PatternManager;
+use crate::url_pattern::find_matching_pattern;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get URL from command line arguments
@@ -33,6 +37,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // If URL is provided, check for matching patterns for auto-launch
+    if let Some(ref url) = initial_url {
+        let config = config::Config::load();
+
+        // Check if any pattern matches the URL
+        if let Some(pattern_match) = find_matching_pattern(url, &config.url_patterns) {
+            // Try to find the matching browser
+            let browsers = browser::discover_browsers();
+
+            if let Some(browser) = browsers
+                .iter()
+                .find(|b| b.name == pattern_match.browser_name)
+            {
+                // Get profiles for this browser
+                let binary_name = browser.exec.split_whitespace().next().unwrap_or("");
+                let profiles = if profile::is_firefox_based(binary_name) {
+                    profile::detect_firefox_profiles(binary_name)
+                } else if profile::is_chromium_based(binary_name) {
+                    profile::detect_chromium_profiles(binary_name)
+                } else {
+                    profile::detect_unknown_profiles()
+                };
+
+                // Find the matching profile
+                if let Some(profile_name) = pattern_match.profile_name {
+                    if let Some(profile) = profiles.iter().find(|p| p.name == profile_name) {
+                        // Get containers if Firefox
+                        let container = if pattern_match.container_name.is_some()
+                            && profile::is_firefox_based(binary_name)
+                        {
+                            let containers = profile::detect_firefox_containers(&profile.path);
+                            pattern_match
+                                .container_name
+                                .and_then(|name| containers.into_iter().find(|c| c.name == name))
+                        } else {
+                            None
+                        };
+
+                        // Launch directly without TUI
+                        launcher::launch(
+                            browser,
+                            profile,
+                            container.as_ref(),
+                            url,
+                            pattern_match.incognito,
+                            pattern_match.new_window,
+                        )?;
+                        return Ok(());
+                    }
+                } else if let Some(profile) = profiles.first() {
+                    // No profile specified, use first (default)
+                    let container = if pattern_match.container_name.is_some()
+                        && profile::is_firefox_based(binary_name)
+                    {
+                        let containers = profile::detect_firefox_containers(&profile.path);
+                        pattern_match
+                            .container_name
+                            .and_then(|name| containers.into_iter().find(|c| c.name == name))
+                    } else {
+                        None
+                    };
+
+                    // Launch directly without TUI
+                    launcher::launch(
+                        browser,
+                        profile,
+                        container.as_ref(),
+                        url,
+                        pattern_match.incognito,
+                        pattern_match.new_window,
+                    )?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // No pattern match or no URL - proceed with normal TUI flow
     // Setup terminal
     enable_raw_mode()?;
     // Set up panic handler to restore terminal on crash
