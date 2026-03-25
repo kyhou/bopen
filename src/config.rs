@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::url_pattern::UrlPattern;
+
 /// Configuration structure for persistent settings
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Config {
@@ -10,6 +12,8 @@ pub struct Config {
     pub last_container: Option<String>,
     pub last_incognito: bool,
     pub last_new_window: bool,
+    /// URL patterns for auto-launching browsers
+    pub url_patterns: Vec<UrlPattern>,
 }
 
 impl Config {
