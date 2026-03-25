@@ -22,6 +22,8 @@ pub enum Focus {
 pub struct App {
     /// The URL to open
     pub url: String,
+    /// Cursor position in the URL field
+    pub url_cursor_pos: usize,
     /// List of discovered browsers
     pub browsers: Vec<Browser>,
     /// List of profiles for the selected browser
@@ -56,8 +58,11 @@ impl App {
     /// Creates a new App instance with default state
     pub fn new(initial_url: Option<String>) -> Self {
         let url_provided = initial_url.is_some();
+        let url = initial_url.unwrap_or_default();
+        let url_len = url.len();
         let mut app = Self {
-            url: initial_url.unwrap_or_default(),
+            url,
+            url_cursor_pos: url_len,
             browsers: Vec::new(),
             profiles: Vec::new(),
             containers: Vec::new(),
@@ -424,30 +429,31 @@ impl App {
                 }
             }
             crossterm::event::KeyCode::Left => {
-                if self.focus == Focus::Url && !self.url.is_empty() {
-                    self.url.pop();
+                if self.focus == Focus::Url && self.url_cursor_pos > 0 {
+                    self.url_cursor_pos -= 1;
                 }
             }
             crossterm::event::KeyCode::Right => {
-                // Right arrow just moves focus, doesn't insert
-                if self.focus != Focus::Url {
-                    self.focus_next();
+                if self.focus == Focus::Url && self.url_cursor_pos < self.url.len() {
+                    self.url_cursor_pos += 1;
                 }
             }
             crossterm::event::KeyCode::Backspace => {
-                if self.focus == Focus::Url && !self.url.is_empty() {
-                    self.url.pop();
+                if self.focus == Focus::Url && self.url_cursor_pos > 0 {
+                    self.url.remove(self.url_cursor_pos - 1);
+                    self.url_cursor_pos -= 1;
                 }
             }
             crossterm::event::KeyCode::Delete => {
-                if self.focus == Focus::Url {
-                    self.url.clear();
+                if self.focus == Focus::Url && self.url_cursor_pos < self.url.len() {
+                    self.url.remove(self.url_cursor_pos);
                 }
             }
             crossterm::event::KeyCode::Char(c) => {
                 if self.focus == Focus::Url {
-                    // Add character to URL
-                    self.url.push(c);
+                    // Insert character at cursor position
+                    self.url.insert(self.url_cursor_pos, c);
+                    self.url_cursor_pos += 1;
                 } else if key
                     .modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL)
