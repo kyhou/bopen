@@ -162,11 +162,20 @@ fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Create pattern manager (initially hidden)
+    let mut pattern_manager: Option<PatternManager> = None;
+
     loop {
-        terminal.draw(|f| ui(f, app))?;
+        terminal.draw(|f| {
+            if let Some(ref pm) = pattern_manager {
+                render_pattern_manager(f, pm);
+            } else {
+                ui(f, app);
+            }
+        })?;
 
         // Check if exit was requested
-        if app.exit_requested {
+        if app.exit_requested && pattern_manager.is_none() {
             break;
         }
 
@@ -177,9 +186,41 @@ fn run_app<B: ratatui::backend::Backend>(
                     .modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL)
             {
-                break;
+                if pattern_manager.is_some() {
+                    // Close pattern manager on Ctrl+C instead of exiting
+                    pattern_manager = None;
+                } else {
+                    break;
+                }
             }
-            app.handle_key_event(key);
+
+            // Handle pattern manager keys
+            if let Some(ref mut pm) = pattern_manager {
+                pm.handle_key(key);
+
+                // Check if pattern manager should close
+                if pm.should_close {
+                    // Save patterns if modified
+                    if pm.modified {
+                        if let Err(e) = pm.save_to_config(&mut app.config) {
+                            pm.set_error(format!("Failed to save: {}", e));
+                            pm.should_close = false; // Keep open on error
+                        }
+                    }
+                    pattern_manager = None;
+                }
+            } else {
+                // Check for pattern manager shortcut (Ctrl+P)
+                if key.code == crossterm::event::KeyCode::Char('p')
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                {
+                    pattern_manager = Some(PatternManager::new(&app.config));
+                } else {
+                    app.handle_key_event(key);
+                }
+            }
         }
     }
     Ok(())
@@ -217,7 +258,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     // URL input
     let url_focused = app.focus == Focus::Url;
     let url_content = if url_focused {
-        format!("> {} _", app.url)
+        // Insert cursor indicator at cursor position
+        let before = &app.url[..app.url_cursor_pos];
+        let after = &app.url[app.url_cursor_pos..];
+        format!("> {}_ {}", before, after)
     } else {
         app.url.clone()
     };
@@ -493,7 +537,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
     // Shortcuts help
     let shortcuts = Paragraph::new(
-        "TAB/Arrows: Navigate  |  ENTER: Select  |  ESC: Cancel  |  c: Copy  o: Open  i: Incognito  w: Window  q: Quit",
+        "TAB/Arrows: Navigate  |  ENTER: Select  |  ESC: Cancel  |  Ctrl+P: Patterns  |  c: Copy  o: Open  i: Incognito  w: Window  q: Quit",
     )
     .style(Style::default().fg(Color::DarkGray))
     .alignment(ratatui::layout::Alignment::Center);
@@ -621,4 +665,571 @@ fn centered_rect(
             .as_ref(),
         )
         .split(popup_layout[1])[1]
+}
+
+use crate::pattern_manager::{FormField, PatternManagerMode};
+
+/// Renders the pattern manager UI
+fn render_pattern_manager(f: &mut ratatui::Frame, pm: &PatternManager) {
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([
+            Constraint::Length(3), // Title
+            Constraint::Min(10),   // Content area
+            Constraint::Length(3), // Help text
+        ])
+        .split(f.size());
+
+    // Title
+    let title_text = match pm.mode {
+        PatternManagerMode::List => {
+            "URL Pattern Manager - Press 'a' to add, 'e' to edit, 'd' to delete"
+        }
+        PatternManagerMode::Add => "Add New Pattern",
+        PatternManagerMode::Edit => "Edit Pattern",
+    };
+
+    let title = Paragraph::new(title_text)
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(ratatui::layout::Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(title, main_chunks[0]);
+
+    // Render based on mode
+    match pm.mode {
+        PatternManagerMode::List => render_pattern_list(f, pm, main_chunks[1]),
+        PatternManagerMode::Add | PatternManagerMode::Edit => {
+            render_pattern_form(f, pm, main_chunks[1])
+        }
+    }
+
+    // Help text at bottom
+    let help_text = match pm.mode {
+        PatternManagerMode::List => "q/Esc: Close | ↑/↓: Navigate | a: Add | e: Edit | d: Delete",
+        PatternManagerMode::Add | PatternManagerMode::Edit => {
+            "Tab: Next field | Esc: Cancel | Enter: Select/Save | ↑/↓: Navigate dropdown"
+        }
+    };
+    let help = Paragraph::new(help_text)
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(help, main_chunks[2]);
+
+    // Error message
+    if let Some(ref error) = pm.error {
+        let error_block = Paragraph::new(error.as_str())
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Error")
+                    .title_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            );
+        let area = centered_rect(60, 20, f.size());
+        f.render_widget(Clear, area);
+        f.render_widget(error_block, area);
+    }
+
+    // Info message
+    if let Some(ref info) = pm.info {
+        let info_block = Paragraph::new(info.as_str())
+            .style(Style::default().fg(Color::Blue))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Info")
+                    .title_style(Style::default().fg(Color::Blue)),
+            );
+        let area = centered_rect(60, 10, f.size());
+        f.render_widget(Clear, area);
+        f.render_widget(info_block, area);
+    }
+
+    // Dropdown overlays (only in Add/Edit mode)
+    if let PatternManagerMode::Add | PatternManagerMode::Edit = pm.mode {
+        if let Some(dropdown_field) = pm.dropdown_open {
+            render_pattern_dropdown(f, pm, dropdown_field);
+        }
+    }
+}
+
+/// Renders the pattern list
+fn render_pattern_list(f: &mut ratatui::Frame, pm: &PatternManager, area: ratatui::layout::Rect) {
+    let list_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5)])
+        .split(area);
+
+    if pm.patterns.is_empty() {
+        let empty_msg = Paragraph::new("No patterns configured. Press 'a' to add one.")
+            .style(Style::default().fg(Color::Yellow))
+            .alignment(ratatui::layout::Alignment::Center)
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(empty_msg, list_chunks[0]);
+    } else {
+        let items: Vec<ListItem> = pm
+            .patterns
+            .iter()
+            .enumerate()
+            .map(|(i, pattern)| {
+                let content = format!(
+                    "{} {} | {} |{}{}",
+                    pattern.pattern,
+                    pattern
+                        .profile
+                        .as_ref()
+                        .map(|p| format!("@ {}", p))
+                        .unwrap_or_default(),
+                    pattern.browser,
+                    if pattern.incognito { " (private)" } else { "" },
+                    if pattern.new_window {
+                        " (new window)"
+                    } else {
+                        ""
+                    }
+                );
+                let style = if i == pm.selected_index {
+                    Style::default()
+                        .bg(Color::Cyan)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(content).style(style)
+            })
+            .collect();
+
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Patterns ({} total)", pm.patterns.len()))
+                .title_style(Style::default().fg(Color::Cyan)),
+        );
+        f.render_widget(list, list_chunks[0]);
+    }
+}
+
+/// Renders the pattern form for adding/editing
+fn render_pattern_form(f: &mut ratatui::Frame, pm: &PatternManager, area: ratatui::layout::Rect) {
+    let container_visible = pm.is_container_field_visible();
+
+    let mut constraints = vec![
+        Constraint::Length(3), // Pattern field
+        Constraint::Length(3), // Browser field
+        Constraint::Length(3), // Profile field
+    ];
+
+    if container_visible {
+        constraints.push(Constraint::Length(3)); // Container field
+    }
+
+    constraints.extend([
+        Constraint::Length(3), // Incognito toggle
+        Constraint::Length(3), // Buttons
+    ]);
+
+    let form_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints(constraints)
+        .split(area);
+
+    let selected_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let normal_style = Style::default().fg(Color::Gray);
+    let dropdown_open_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    // Pattern field
+    let pattern_focused = pm.focused_field == FormField::Pattern;
+    // Insert cursor indicator at cursor position
+    let before = &pm.form.pattern[..pm.pattern_cursor_pos];
+    let after = &pm.form.pattern[pm.pattern_cursor_pos..];
+    let pattern_text = format!("{}_{}", before, after);
+    let pattern_widget = Paragraph::new(pattern_text)
+        .style(if pattern_focused {
+            selected_style
+        } else {
+            normal_style
+        })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(if pattern_focused {
+                    selected_style
+                } else {
+                    normal_style
+                })
+                .title("Pattern (regex) - Type to edit")
+                .title_style(if pattern_focused {
+                    selected_style
+                } else {
+                    normal_style
+                }),
+        );
+    f.render_widget(pattern_widget, form_chunks[0]);
+
+    // Browser dropdown
+    let browser_focused = pm.focused_field == FormField::Browser;
+    let browser_dropdown_open = pm.dropdown_open == Some(FormField::Browser);
+    let browser_title = if browser_dropdown_open {
+        "Browser - ENTER to close"
+    } else {
+        "Browser - ENTER to select"
+    };
+
+    let browser_items: Vec<ListItem> = pm
+        .available_browsers
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let style = if browser_dropdown_open && i == pm.selected_browser_index {
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else if b.name == pm.form.browser {
+                Style::default().fg(Color::Green)
+            } else {
+                normal_style
+            };
+            ListItem::new(b.name.clone()).style(style)
+        })
+        .collect();
+
+    let browser_list = List::new(browser_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(if browser_focused {
+                    if browser_dropdown_open {
+                        dropdown_open_style
+                    } else {
+                        selected_style
+                    }
+                } else {
+                    normal_style
+                })
+                .title(browser_title)
+                .title_style(if browser_focused {
+                    if browser_dropdown_open {
+                        dropdown_open_style
+                    } else {
+                        selected_style
+                    }
+                } else {
+                    normal_style
+                }),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    f.render_stateful_widget(
+        browser_list,
+        form_chunks[1],
+        &mut ListState::default().with_selected(Some(pm.selected_browser_index)),
+    );
+
+    // Profile dropdown
+    let profile_focused = pm.focused_field == FormField::Profile;
+    let profile_dropdown_open = pm.dropdown_open == Some(FormField::Profile);
+    let profile_title = if profile_dropdown_open {
+        "Profile - ENTER to close"
+    } else {
+        "Profile - ENTER to select"
+    };
+
+    let profile_items: Vec<ListItem> = pm
+        .available_profiles
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let style = if profile_dropdown_open && i == pm.selected_profile_index {
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else if p.name == pm.form.profile {
+                Style::default().fg(Color::Green)
+            } else {
+                normal_style
+            };
+            ListItem::new(p.name.clone()).style(style)
+        })
+        .collect();
+
+    let profile_list = List::new(profile_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(if profile_focused {
+                    if profile_dropdown_open {
+                        dropdown_open_style
+                    } else {
+                        selected_style
+                    }
+                } else {
+                    normal_style
+                })
+                .title(profile_title)
+                .title_style(if profile_focused {
+                    if profile_dropdown_open {
+                        dropdown_open_style
+                    } else {
+                        selected_style
+                    }
+                } else {
+                    normal_style
+                }),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    f.render_stateful_widget(
+        profile_list,
+        form_chunks[2],
+        &mut ListState::default().with_selected(Some(pm.selected_profile_index)),
+    );
+
+    let mut chunk_idx = 3;
+
+    // Container dropdown (only for Firefox with containers)
+    if container_visible {
+        let container_focused = pm.focused_field == FormField::Container;
+        let container_dropdown_open = pm.dropdown_open == Some(FormField::Container);
+        let container_title = if container_dropdown_open {
+            "Container - ENTER to close"
+        } else {
+            "Container - ENTER to select"
+        };
+
+        let container_items: Vec<ListItem> = pm
+            .available_containers
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let style = if container_dropdown_open && i == pm.selected_container_index {
+                    Style::default()
+                        .bg(Color::Cyan)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD)
+                } else if pm.form.container == c.name {
+                    Style::default().fg(Color::Green)
+                } else {
+                    normal_style
+                };
+                ListItem::new(c.name.clone()).style(style)
+            })
+            .collect();
+
+        let container_list = List::new(container_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(if container_focused {
+                        if container_dropdown_open {
+                            dropdown_open_style
+                        } else {
+                            selected_style
+                        }
+                    } else {
+                        normal_style
+                    })
+                    .title(container_title)
+                    .title_style(if container_focused {
+                        if container_dropdown_open {
+                            dropdown_open_style
+                        } else {
+                            selected_style
+                        }
+                    } else {
+                        normal_style
+                    }),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">> ");
+
+        f.render_stateful_widget(
+            container_list,
+            form_chunks[chunk_idx],
+            &mut ListState::default().with_selected(Some(pm.selected_container_index)),
+        );
+        chunk_idx += 1;
+    }
+
+    // Toggles row (Incognito and New Window)
+    let toggles_focused =
+        pm.focused_field == FormField::Incognito || pm.focused_field == FormField::NewWindow;
+    let incognito_focused = pm.focused_field == FormField::Incognito;
+    let new_window_focused = pm.focused_field == FormField::NewWindow;
+
+    let incognito_text = if pm.form.incognito { "[X]" } else { "[ ]" };
+    let incognito_key = if incognito_focused { " INC" } else { " [i]" };
+
+    let new_window_text = if pm.form.new_window { "[X]" } else { "[ ]" };
+    let new_window_key = if new_window_focused { " WIN" } else { " [w]" };
+
+    let toggles_text = format!(
+        "{}{} Incognito/Private     {}{} New Window",
+        incognito_text, incognito_key, new_window_text, new_window_key
+    );
+    let toggles_widget = Paragraph::new(toggles_text)
+        .style(if toggles_focused {
+            selected_style
+        } else {
+            normal_style
+        })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(if toggles_focused {
+                    selected_style
+                } else {
+                    normal_style
+                })
+                .title("Options - ENTER to toggle")
+                .title_style(if toggles_focused {
+                    selected_style
+                } else {
+                    normal_style
+                }),
+        );
+    f.render_widget(toggles_widget, form_chunks[chunk_idx]);
+    chunk_idx += 1;
+
+    // Buttons
+    let save_focused = pm.focused_field == FormField::SaveButton;
+    let cancel_focused = pm.focused_field == FormField::CancelButton;
+
+    let save_text = if save_focused {
+        "[ ENTER ] Save"
+    } else {
+        "[Tab] Save"
+    };
+    let cancel_text = if cancel_focused {
+        "[ ENTER ] Cancel"
+    } else {
+        "[Tab] Cancel"
+    };
+
+    let buttons_text = format!("{:^20}   {:^20}", save_text, cancel_text);
+    let buttons_widget = Paragraph::new(buttons_text)
+        .style(Style::default().fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(if save_focused || cancel_focused {
+                    selected_style
+                } else {
+                    normal_style
+                })
+                .title("Actions")
+                .title_style(if save_focused || cancel_focused {
+                    selected_style
+                } else {
+                    normal_style
+                }),
+        );
+    f.render_widget(buttons_widget, form_chunks[chunk_idx]);
+}
+
+/// Renders a dropdown overlay for the pattern manager
+fn render_pattern_dropdown(f: &mut ratatui::Frame, pm: &PatternManager, field: FormField) {
+    let (items, selected, title): (Vec<&str>, usize, &str) = match field {
+        FormField::Browser => (
+            pm.available_browsers
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect(),
+            pm.selected_browser_index,
+            "Select Browser",
+        ),
+        FormField::Profile => (
+            pm.available_profiles
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect(),
+            pm.selected_profile_index,
+            "Select Profile",
+        ),
+        FormField::Container => (
+            pm.available_containers
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect(),
+            pm.selected_container_index,
+            "Select Container",
+        ),
+        _ => return, // No dropdown for other fields
+    };
+
+    if items.is_empty() {
+        return;
+    }
+
+    let list_items: Vec<ListItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, &item)| {
+            let style = if i == selected {
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(item).style(style)
+        })
+        .collect();
+
+    let dropdown = List::new(list_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .title_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    let area = centered_rect(50, 30, f.size());
+    f.render_widget(Clear, area);
+    f.render_stateful_widget(
+        dropdown,
+        area,
+        &mut ListState::default().with_selected(Some(selected)),
+    );
 }
