@@ -2,7 +2,7 @@
 
 Terminal-based browser launcher for Linux with profile and container support.
 
-![bopen screenshot](https://github.com/user-attachments/assets/35cc67fc-a215-48b1-a255-9dcca1ddd7c3)
+![bopen screenshot](https://github.com/user-attachments/assets/13ccfbf6-8916-4706-b162-9cae1ad5ddec)
 
 ## Install
 
